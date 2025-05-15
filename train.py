@@ -278,6 +278,10 @@ group.add_argument('--mixup-mode', type=str, default='batch',
                     help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 group.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
                     help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
+# 动态学习率配置
+group.add_argument('--warmup-epochs', type=int, default=5, help='Number of warmup epochs')
+group.add_argument('--min-lr', type=float, default=1e-6, help='Minimum learning rate')
+# 标签平滑配置
 group.add_argument('--smoothing', type=float, default=0.1,
                     help='Label smoothing (default: 0.1)')
 group.add_argument('--train-interpolation', type=str, default='random',
@@ -920,7 +924,26 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
                         loss=losses_m, top1=top1_m, top5=top5_m))
 
-    metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
+    # 新增mIoU和推理速度指标
+        batch_time = time.time() - end
+        
+        # 计算mIoU (示例实现)
+        preds = torch.argmax(output, dim=1)
+        target = target.squeeze(1)
+        iou = torch.zeros(output.shape[1])
+        for cls in range(output.shape[1]):
+            intersection = ((preds == cls) & (target == cls)).sum().float()
+            union = ((preds == cls) | (target == cls)).sum().float()
+            iou[cls] = (intersection + 1e-6) / (union + 1e-6)
+        miou = iou.mean().item()
+        
+        metrics = OrderedDict([
+            ('loss', losses_m.avg),
+            ('top1', top1_m.avg),
+            ('top5', top5_m.avg),
+            ('miou', miou),
+            ('batch_time', batch_time)
+        ])
 
     return metrics
 

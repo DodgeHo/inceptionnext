@@ -47,6 +47,61 @@ class PartialConv2d(nn.Module):
         )
 
 
+class MSCABlock(nn.Module):
+    r""" ConvNeXt Block with MSCA attention"""
+    def __init__(self, dim, kernel_sizes=[3,5,7],
+                drop_path=0., layer_scale_init_value=1e-6,
+                conv_fn=nn.Conv2d,
+                ):
+        super().__init__()
+        
+        # 多尺度卷积分支
+        self.conv_branches = nn.ModuleList([
+            conv_fn(dim, dim, kernel_size=ks, padding=ks//2, groups=dim)
+            for ks in kernel_sizes
+        ])
+        
+        # 空间注意力机制
+        self.attn = nn.Sequential(
+            nn.Conv2d(dim, dim//8, 1),
+            nn.LayerNorm([dim//8, 1, 1]),
+            nn.GELU(),
+            nn.Conv2d(dim//8, dim, 1),
+            nn.Sigmoid()
+        )
+        
+        self.norm = LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, 4 * dim)
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim))) \
+            if layer_scale_init_value > 0 else None
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, x):
+        identity = x
+        
+        # 多尺度特征融合
+        conv_outs = [branch(x) for branch in self.conv_branches]
+        fused = sum(conv_outs)
+        
+        # 空间注意力
+        attn_map = self.attn(fused.mean(dim=1, keepdim=True))
+        x = fused * attn_map
+        
+        x = x.permute(0, 2, 3, 1)
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 3, 1, 2)
+        
+        return identity + self.drop_path(x)
+
+
 class Block(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:
     (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
@@ -137,8 +192,8 @@ class ConvNeXt(nn.Module):
         cur = 0
         for i in range(self.num_stages):
             stage = nn.Sequential(
-                *[Block(dim=dims[i], drop_path=dp_rates[cur + j], 
-                kernel_size=kernel_sizes[i],
+                *[MSCABlock(dim=dims[i], drop_path=dp_rates[cur + j],
+                kernel_sizes=[3,5,7],
                 layer_scale_init_value=layer_scale_init_value,
                 conv_fn=conv_fns[i],
                 ) for j in range(depths[i])]
