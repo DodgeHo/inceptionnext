@@ -49,18 +49,28 @@ class PartialConv2d(nn.Module):
 
 class MSCABlock(nn.Module):
     r""" ConvNeXt Block with MSCA attention"""
-    def __init__(self, dim, kernel_sizes=[3,5,7],
+    def __init__(self, dim, kernel_sizes=[3, 11, 11],
                 drop_path=0., layer_scale_init_value=1e-6,
                 conv_fn=nn.Conv2d,
                 ):
         super().__init__()
-        
-        # 多尺度卷积分支
+
+        # 四分支配置 (3x3, 1x11, 11x1, identity)
         self.conv_branches = nn.ModuleList([
-            conv_fn(dim, dim, kernel_size=ks, padding=ks//2, groups=dim)
-            for ks in kernel_sizes
+            conv_fn(dim//4, dim//4, kernel_size=(3,3), padding=1, groups=dim//4)
+            if i==0 else
+            conv_fn(dim//4, dim//4, kernel_size=(1,11), padding=(0,5), groups=dim//4)
+            if i==1 else
+            conv_fn(dim//4, dim//4, kernel_size=(11,1), padding=(5,0), groups=dim//4)
+            for i in range(3)
         ])
-        
+        self.identity = nn.Identity()
+
+        # 参数验证
+        assert len(kernel_sizes) == 3, "需要3个卷积核配置 [3x3, 1x11, 11x1]"
+        assert kernel_sizes[0] == 3 and kernel_sizes[1] == 11 and kernel_sizes[2] == 11, \
+            "卷积核尺寸需要为 [3, 11, 11]"
+
         # 空间注意力机制
         self.attn = nn.Sequential(
             nn.Conv2d(dim, dim//8, 1),
@@ -69,7 +79,10 @@ class MSCABlock(nn.Module):
             nn.Conv2d(dim//8, dim, 1),
             nn.Sigmoid()
         )
-        
+
+        # 通道融合卷积
+        self.channel_fusion = nn.Conv2d(dim*2, dim, 1)  # 包含原始输入和特征处理流
+
         self.norm = LayerNorm(dim, eps=1e-6)
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
@@ -81,15 +94,32 @@ class MSCABlock(nn.Module):
     def forward(self, x):
         identity = x
         
-        # 多尺度特征融合
-        conv_outs = [branch(x) for branch in self.conv_branches]
-        fused = sum(conv_outs)
+        # 分割输入到四个分支
+        x_split = torch.chunk(x, 4, dim=1)
+        
+        # 前三路卷积处理
+        conv_outs = [
+            branch(x_split[i]) for i, branch in enumerate(self.conv_branches)
+        ]
+        # 第四路恒等映射
+        conv_outs.append(self.identity(x_split[3]))
+        
+        # 拼接特征
+        fused = torch.cat(conv_outs, dim=1)
+        
+        # 第一次残差连接
+        fused = identity + fused
         
         # 空间注意力
         attn_map = self.attn(fused.mean(dim=1, keepdim=True))
-        x = fused * attn_map
+        attended = fused * attn_map
         
-        x = x.permute(0, 2, 3, 1)
+        # 通道融合
+        fused_features = torch.cat([identity, attended], dim=1)
+        fused_features = self.channel_fusion(fused_features)
+        
+        # MLP处理
+        x = fused_features.permute(0, 2, 3, 1)
         x = self.norm(x)
         x = self.pwconv1(x)
         x = self.act(x)
@@ -99,7 +129,8 @@ class MSCABlock(nn.Module):
             x = self.gamma * x
         x = x.permute(0, 3, 1, 2)
         
-        return identity + self.drop_path(x)
+        # 最终残差连接
+        return fused_features + self.drop_path(x)
 
 
 class Block(nn.Module):
