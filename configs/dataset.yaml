@@ -1,0 +1,13 @@
+# 数据集存储路径配置
+base_data_dir: data/
+
+coco_captions:
+  images: ${base_data_dir}coco/images
+  annotations: ${base_data_dir}coco/annotations
+
+llava_instruct:
+  instructions: ${base_data_dir}llava/instructions.json
+
+vqa_v2:
+  questions: ${base_data_dir}vqa/questions
+  annotations: ${base_data_dir}vqa/annotations
